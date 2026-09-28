@@ -1,0 +1,24 @@
+[project]
+name = "srag-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Nitin Sen", email = "nitinsen@igtechso.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "google-genai>=2.25.0",
+    "groq>=1.7.0",
+    "mcp[cli]>=2.2.0",
+    "ollama>=0.6.2",
+    "psycopg[binary]>=3.3.6",
+    "python-dotenv>=1.2.3",
+]
+
+[project.scripts]
+srag-mcp = "srag_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
