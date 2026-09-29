@@ -43,7 +43,7 @@ def delete_records(
             for operation in operations:
 
                 table = operation.get("table")
-                where = operation.get("where")
+                where = operation.get("where") or operation.get("filter")
 
                 if not table:
                     raise ValueError("Table name is required.")

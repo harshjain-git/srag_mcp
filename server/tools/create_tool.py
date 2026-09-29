@@ -43,7 +43,13 @@ def create_records(
             for operation in operations:
 
                 table = operation.get("table")
-                records = operation.get("records")
+                records = operation.get("records") or operation.get("values")
+                if not records and operation.get("columns") and operation.get("values"):
+                    cols = operation["columns"]
+                    records = [
+                        dict(zip(cols, val if isinstance(val, (list, tuple)) else [val.get(c) for c in cols]))
+                        for val in operation["values"]
+                    ]
 
                 if not table:
                     raise ValueError("Table name is required.")

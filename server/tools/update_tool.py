@@ -43,8 +43,8 @@ def update_records(
             for operation in operations:
 
                 table = operation.get("table")
-                updates = operation.get("updates")
-                where = operation.get("where")
+                updates = operation.get("updates") or operation.get("set")
+                where = operation.get("where") or operation.get("filter")
 
                 if not table:
                     raise ValueError("Table name is required.")

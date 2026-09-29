@@ -1,87 +1,63 @@
-import os
-import json
 from typing import Any
-
 from google import genai
-
-from client.llm.base import BaseLLM, LLMResponse, ToolCall
 from google.genai import types
+
+from client.llm.base import BaseLLM, LLMResponse, ToolCall, clean_schema, safe_json_loads
 
 
 class GeminiLLM(BaseLLM):
 
     def __init__(self, model: str):
-        api_key = os.getenv("GEMINI_API_KEY")
+        super().__init__(model)
+        self.client = genai.Client(api_key=self.get_api_key("GEMINI_API_KEY"))
 
-        if not api_key:
-            raise ValueError(
-                "GEMINI_API_KEY is not set."
-            )
+    def generate(self, messages: list[dict[str, Any]], tools=None) -> LLMResponse:
+        contents, i = [], 0
+        while i < len(messages):
+            msg, role = messages[i], messages[i].get("role")
 
-        self.client = genai.Client(api_key=api_key)
-        self.model = model
-
-    def generate(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-    ) -> Any:
-
-        contents = []
-
-        for message in messages:
-            contents.append(
-                f"{message['role']}: {message['content']}"
-            )
-
-        prompt = "\n".join(contents)
+            if role == "user":
+                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=msg.get("content", ""))]))
+                i += 1
+            elif role in ("assistant", "model"):
+                raw = msg.get("raw")
+                content = (
+                    raw.candidates[0].content
+                    if (raw and hasattr(raw, "candidates") and raw.candidates)
+                    else types.Content(role="model", parts=[types.Part.from_text(text=msg.get("content", ""))])
+                )
+                contents.append(content)
+                i += 1
+            elif role == "tool":
+                tool_parts = []
+                while i < len(messages) and messages[i].get("role") == "tool":
+                    res = safe_json_loads(messages[i].get("content", ""), {"result": messages[i].get("content", "")})
+                    tool_parts.append(
+                        types.Part.from_function_response(
+                            name=messages[i].get("name", ""),
+                            response=res if isinstance(res, dict) else {"result": res},
+                        )
+                    )
+                    i += 1
+                contents.append(types.Content(role="user", parts=tool_parts))
+            else:
+                i += 1
 
         config = {}
-
         if tools:
-            function_declarations = self.convert_tools(tools)
-            config["tools"] = [
-                types.Tool(
-                    function_declarations=function_declarations
-                )
+            funcs = [
+                types.FunctionDeclaration(name=t.name, description=t.description, parameters=clean_schema(t.input_schema))
+                for t in tools
             ]
+            config["tools"] = [types.Tool(function_declarations=funcs)]
 
-        return self.client.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config=config,
-        )
+        resp = self.client.models.generate_content(model=self.model, contents=contents, config=config)
 
-        print("\nRAW GEMINI RESPONSE:")
-        print(response)
-        return(response)
-
-    def convert_tools(self, tools):
-        return [
-            types.FunctionDeclaration(
-                name=tool.name,
-                description=tool.description,
-                parameters=self.clean_schema(tool.input_schema),
-            )
-            for tool in tools
+        parts = resp.candidates[0].content.parts if (resp.candidates and resp.candidates[0].content) else []
+        tool_calls = [
+            ToolCall(id=p.function_call.id or "", name=p.function_call.name, arguments=dict(p.function_call.args or {}))
+            for p in parts if p.function_call
         ]
+        text = "".join(p.text for p in parts if p.text).strip() or None
 
-
-    @staticmethod
-    def clean_schema(schema):
-        """
-        Remove JSON Schema fields that Gemini does not support.
-        """
-
-        if isinstance(schema, dict):
-            return {
-                key: GeminiLLM.clean_schema(value)
-                for key, value in schema.items()
-                if key != "additionalProperties"
-            }
-
-        if isinstance(schema, list):
-            return [GeminiLLM.clean_schema(item)
-                for item in schema]
-
-        return schema
+        return LLMResponse(text=text, tool_calls=tool_calls, raw=resp)

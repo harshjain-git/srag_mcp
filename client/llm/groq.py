@@ -1,71 +1,42 @@
-import os
-import json
 from typing import Any
-
 from groq import Groq
 
-from client.llm.base import BaseLLM, LLMResponse, ToolCall
+from client.llm.base import BaseLLM, LLMResponse, ToolCall, clean_schema, safe_json_loads
 
 
 class GroqLLM(BaseLLM):
 
     def __init__(self, model: str):
-        api_key = os.getenv("GROQ_API_KEY")
+        super().__init__(model)
+        self.client = Groq(api_key=self.get_api_key("GROQ_API_KEY"))
 
-        if not api_key:
-            raise ValueError(
-                "GROQ_API_KEY is not set."
-            )
+    def generate(self, messages: list[dict[str, Any]], tools=None) -> LLMResponse:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": [self._format_msg(m) for m in messages],
+        }
+        if tools:
+            kwargs["tools"] = [
+                {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": clean_schema(t.input_schema)}}
+                for t in tools
+            ]
+            kwargs["tool_choice"] = "auto"
 
-        self.client = Groq(api_key=api_key)
-        self.model = model
+        resp = self.client.chat.completions.create(**kwargs)
+        msg = resp.choices[0].message
 
-    def generate(
-        self,
-        messages: list[dict[str, Any]],
-        tools= None,
-    ) -> LLMResponse:
-
-        groq_tools = self.convert_tools(tools) if tools else []
-
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=groq_tools,
-            tool_choice="auto",
-        )
-
-        message = response.choices[0].message
-
-        tool_calls = []
-
-        if message.tool_calls:
-            for tool_call in message.tool_calls:
-                tool_calls.append(
-                ToolCall(
-                    id=tool_call.id,
-                    name=tool_call.function.name,
-                    arguments=__import__("json").loads(
-                        tool_call.function.arguments
-                    ),
-                )
-            )
-
-        return LLMResponse(
-            text=message.content,
-            tool_calls=tool_calls,
-            raw=response,
-        )
-
-    def convert_tools(self, tools):
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.input_schema,
-                },
-            }
-            for tool in tools
+        tool_calls = [
+            ToolCall(id=tc.id or "", name=tc.function.name, arguments=safe_json_loads(tc.function.arguments, fallback={}))
+            for tc in (msg.tool_calls or [])
         ]
+        return LLMResponse(text=msg.content, tool_calls=tool_calls, raw=resp)
+
+    @staticmethod
+    def _format_msg(msg: dict[str, Any]) -> dict[str, Any]:
+        role = msg.get("role")
+        if role in ("assistant", "model"):
+            calls = [tc.to_openai_dict() if isinstance(tc, ToolCall) else tc for tc in msg.get("tool_calls", [])]
+            return {"role": "assistant", "content": msg.get("content") or "", **({"tool_calls": calls} if calls else {})}
+        if role == "tool":
+            return {"role": "tool", "tool_call_id": msg.get("tool_call_id", "call_0"), "name": msg.get("name", ""), "content": str(msg.get("content", ""))}
+        return {"role": role, "content": msg.get("content", "")}
