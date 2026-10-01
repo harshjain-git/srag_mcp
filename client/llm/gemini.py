@@ -12,12 +12,15 @@ class GeminiLLM(BaseLLM):
         self.client = genai.Client(api_key=self.get_api_key("GEMINI_API_KEY"))
 
     def generate(self, messages: list[dict[str, Any]], tools=None) -> LLMResponse:
+        system_texts = [m.get("content", "") for m in messages if m.get("role") == "system"]
+        sys_instruction = "\n\n".join(s for s in system_texts if s) if system_texts else None
+
         contents, i = [], 0
         while i < len(messages):
             msg, role = messages[i], messages[i].get("role")
 
             if role == "system":
-                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=f"[System Instructions]\n{msg.get('content', '')}\n[End System Instructions]")]))
+                # Handled via GenerateContentConfig(system_instruction=...)
                 i += 1
             elif role == "user":
                 contents.append(types.Content(role="user", parts=[types.Part.from_text(text=msg.get("content", ""))]))
@@ -46,14 +49,17 @@ class GeminiLLM(BaseLLM):
             else:
                 i += 1
 
-        config = {}
+        config_kwargs: dict[str, Any] = {}
+        if sys_instruction:
+            config_kwargs["system_instruction"] = sys_instruction
         if tools:
             funcs = [
                 types.FunctionDeclaration(name=t.name, description=t.description, parameters=clean_schema(t.input_schema))
                 for t in tools
             ]
-            config["tools"] = [types.Tool(function_declarations=funcs)]
+            config_kwargs["tools"] = [types.Tool(function_declarations=funcs)]
 
+        config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
         resp = self.client.models.generate_content(model=self.model, contents=contents, config=config)
 
         parts = resp.candidates[0].content.parts if (resp.candidates and resp.candidates[0].content) else []
