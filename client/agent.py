@@ -141,11 +141,14 @@ async def run_agent(
 
         SYSTEM_INSTRUCTION = (
             "You are a helpful, knowledgeable AI database assistant connected to PostgreSQL via MCP.\n"
-            "Guidelines for your final answer:\n"
-            "1. Respond in natural, conversational English with friendly, clear explanations.\n"
-            "2. When presenting lists, rows, or query results, use clean bullet points with bold titles (e.g. • **Name**: info) or clear sentences.\n"
-            "3. DO NOT output raw ASCII pipe-separated tables (such as | Col1 | Col2 |) in your text answer. Keep the narrative clean and readable.\n"
-            "4. Highlight key totals, counts, and findings clearly."
+            "Guidelines for formatting your response:\n"
+            "1. Respond in natural, conversational, and human-friendly English.\n"
+            "2. When presenting lists, tables, or records, place EVERY item on its OWN SEPARATE LINE as a bullet point (using '- '). NEVER group multiple bullet points into one paragraph or single continuous line.\n"
+            "3. Format each bullet cleanly with bold titles: e.g.:\n"
+            "   - **Department Name**: Description or location\n"
+            "   - **Employee Name**: Role and department\n"
+            "4. DO NOT output raw ASCII pipe-separated tables (such as | Col1 | Col2 |) in your text response. Provide clean, natural prose.\n"
+            "5. Keep the response readable, nicely spaced, and easy to skim."
         )
 
         # Build initial message history
@@ -206,11 +209,11 @@ async def run_agent(
                 try:
                     loaded = json.loads(result_text)
                     if isinstance(loaded, list):
-                        parsed_records = loaded
+                        parsed_records = [r for r in loaded if isinstance(r, dict)]
                     elif isinstance(loaded, dict):
                         if "records" in loaded and isinstance(loaded["records"], list):
-                            parsed_records = loaded["records"]
-                        else:
+                            parsed_records = [r for r in loaded["records"] if isinstance(r, dict)]
+                        elif not any(isinstance(v, (dict, list)) for v in loaded.values()):
                             parsed_records = [loaded]
                 except Exception:
                     # Stream of multiple JSON objects separated by whitespace/newlines
@@ -227,13 +230,19 @@ async def run_agent(
                             if isinstance(obj, dict):
                                 parsed_records.append(obj)
                             elif isinstance(obj, list):
-                                parsed_records.extend(obj)
+                                parsed_records.extend([r for r in obj if isinstance(r, dict)])
                             idx = next_idx
                     except Exception:
                         pass
 
-                if parsed_records and (not tabular_data or tool_call.name == "query"):
-                    tabular_data = parsed_records
+                # Only save tabular_data for SQL queries returning flat row records (never schema metadata)
+                if tool_call.name == "query" and parsed_records:
+                    flat_records = [
+                        r for r in parsed_records
+                        if isinstance(r, dict) and not any(isinstance(v, (dict, list)) for v in r.values())
+                    ]
+                    if flat_records:
+                        tabular_data = flat_records
 
                 if "sql" in tool_call.arguments:
                     captured_sql = tool_call.arguments["sql"]

@@ -345,6 +345,15 @@
       box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
     }
 
+    .bubble-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
     .model-badge {
       display: inline-flex;
       align-items: center;
@@ -352,7 +361,6 @@
       font-size: 11px;
       font-weight: 500;
       color: var(--text-dim);
-      margin-bottom: 8px;
       background: rgba(255, 255, 255, 0.04);
       padding: 3px 8px;
       border-radius: 6px;
@@ -368,14 +376,82 @@
       border-radius: 4px;
     }
 
-    .message-bubble ul, .message-bubble ol {
-      margin: 8px 0 8px 24px;
-      padding-left: 0;
+    .btn-toggle-tools {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: var(--text-muted);
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      user-select: none;
+    }
+
+    .btn-toggle-tools:hover {
+      background: rgba(99, 102, 241, 0.15);
+      border-color: rgba(99, 102, 241, 0.4);
+      color: #cbd5e1;
+    }
+
+    .btn-toggle-tools.active {
+      background: rgba(99, 102, 241, 0.2);
+      border-color: rgba(99, 102, 241, 0.5);
+      color: #a5b4fc;
+    }
+
+    .btn-toggle-tools .chevron {
+      font-size: 9px;
+      transition: transform 0.2s;
+    }
+
+    .tools-drawer {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px dashed rgba(255, 255, 255, 0.1);
+      animation: drawerSlide 0.2s ease-out;
+    }
+
+    @keyframes drawerSlide {
+      from { opacity: 0; transform: translateY(-6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .answer-content {
+      font-size: 14px;
       line-height: 1.7;
+      color: var(--text-main);
+    }
+
+    .table-card {
+      margin-top: 14px;
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.25);
+      border: 1px solid var(--border-subtle);
+      overflow: hidden;
+    }
+
+    .table-card-header {
+      padding: 8px 12px;
+      background: rgba(255, 255, 255, 0.03);
+      font-size: 11px;
+      font-weight: 600;
+      color: #a5b4fc;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .message-bubble ul, .message-bubble ol {
+      margin: 10px 0 12px 24px;
+      padding-left: 0;
+      line-height: 1.75;
     }
 
     .message-bubble li {
-      margin-bottom: 6px;
+      margin-bottom: 8px;
     }
 
     .message-bubble p {
@@ -976,15 +1052,29 @@
       row.className = 'message-row assistant';
 
       let toolHtml = '';
+      let toolsToggleBtn = '';
       if (payload.steps && payload.steps.length > 0) {
-        toolHtml = '<div class="tool-card">';
+        const hasSql = payload.steps.some(s => !!s.sql);
+        const btnLabel = hasSql 
+          ? `⚡ ${payload.steps.length} Tool${payload.steps.length > 1 ? 's' : ''} • View SQL`
+          : `⚡ ${payload.steps.length} Tool${payload.steps.length > 1 ? 's' : ''} Used`;
+
+        toolsToggleBtn = `
+          <button class="btn-toggle-tools" onclick="toggleTools(this)">
+            <span>${btnLabel}</span>
+            <span class="chevron">▼</span>
+          </button>
+        `;
+
+        toolHtml = '<div class="tools-drawer" style="display: none;">';
         payload.steps.forEach(step => {
           const pillClass = ['query', 'schema', 'create', 'update', 'delete'].includes(step.tool) ? step.tool : 'query';
           toolHtml += `
-            <div class="tool-header">
-              <span class="tool-pill ${pillClass}">⚡ Tool: ${escapeHtml(step.tool)}</span>
-              <span style="color: var(--text-dim)">Turn ${step.turn}</span>
-            </div>
+            <div class="tool-card">
+              <div class="tool-header">
+                <span class="tool-pill ${pillClass}">⚡ Tool: ${escapeHtml(step.tool)}</span>
+                <span style="color: var(--text-dim)">Turn ${step.turn}</span>
+              </div>
           `;
           if (step.sql) {
             toolHtml += `
@@ -997,31 +1087,40 @@
               </div>
             `;
           }
+          toolHtml += '</div>';
         });
         toolHtml += '</div>';
       }
 
       let tableHtml = '';
-      if (payload.data && Array.isArray(payload.data) && payload.data.length > 0) {
-        const columns = Object.keys(payload.data[0]);
-        tableHtml = `
-          <div class="table-container">
-            <table>
-              <thead>
-                <tr>
-                  ${columns.map(col => `<th>${escapeHtml(col)}</th>`).join('')}
-                </tr>
-              </thead>
-              <tbody>
-                ${payload.data.map(row => `
-                  <tr>
-                    ${columns.map(col => `<td>${escapeHtml(row[col] !== null && row[col] !== undefined ? String(row[col]) : 'NULL')}</td>`).join('')}
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-        `;
+      if (payload.data && Array.isArray(payload.data) && payload.data.length > 0 && typeof payload.data[0] === 'object') {
+        const columns = Object.keys(payload.data[0]).filter(k => {
+          const val = payload.data[0][k];
+          return val === null || val === undefined || typeof val !== 'object';
+        });
+        if (columns.length > 0) {
+          tableHtml = `
+            <div class="table-card">
+              <div class="table-card-header">📊 Query Result Data (${payload.data.length} row${payload.data.length > 1 ? 's' : ''})</div>
+              <div class="table-container" style="margin: 0; border: none; border-radius: 0;">
+                <table>
+                  <thead>
+                    <tr>
+                      ${columns.map(col => `<th>${escapeHtml(col)}</th>`).join('')}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${payload.data.map(row => `
+                      <tr>
+                        ${columns.map(col => `<td>${escapeHtml(row[col] !== null && row[col] !== undefined ? String(row[col]) : 'NULL')}</td>`).join('')}
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          `;
+        }
       }
 
       const modelBadge = payload.model ? `
@@ -1034,15 +1133,34 @@
       row.innerHTML = `
         <div class="message-avatar">AI</div>
         <div class="message-bubble">
-          ${modelBadge}
-          ${toolHtml}
+          <div class="bubble-header">
+            ${modelBadge}
+            ${toolsToggleBtn}
+          </div>
+          <div class="answer-content">
+            ${formatMarkdown(payload.answer || '')}
+          </div>
           ${tableHtml}
-          <div style="margin-top: 8px;">${formatMarkdown(payload.answer || '')}</div>
+          ${toolHtml}
         </div>
       `;
 
       chatHistory.appendChild(row);
       chatHistory.scrollTop = chatHistory.scrollHeight;
+    }
+
+    function toggleTools(btn) {
+      const bubble = btn.closest('.message-bubble');
+      if (!bubble) return;
+      const drawer = bubble.querySelector('.tools-drawer');
+      if (!drawer) return;
+      const isHidden = drawer.style.display === 'none';
+      drawer.style.display = isHidden ? 'block' : 'none';
+      btn.classList.toggle('active', isHidden);
+      const chevron = btn.querySelector('.chevron');
+      if (chevron) {
+        chevron.textContent = isHidden ? '▲' : '▼';
+      }
     }
 
     function escapeHtml(str) {
@@ -1071,6 +1189,14 @@
 
     function formatMarkdown(text) {
       if (!text) return '';
+
+      // Auto-split inline bullets so every bullet item gets its own separate line
+      // Handles cases where models output "• Item 1 • Item 2" in a single line
+      text = text.replace(/([^\n])\s*[•*]\s+/g, '$1\n\n- ');
+      if (text.startsWith('• ') || text.startsWith('* ')) {
+        text = '- ' + text.slice(2);
+      }
+
       if (window.marked && typeof window.marked.parse === 'function') {
         try {
           return window.marked.parse(text);
