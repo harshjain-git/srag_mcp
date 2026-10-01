@@ -16,7 +16,10 @@ class GeminiLLM(BaseLLM):
         while i < len(messages):
             msg, role = messages[i], messages[i].get("role")
 
-            if role == "user":
+            if role == "system":
+                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=f"[System Instructions]\n{msg.get('content', '')}\n[End System Instructions]")]))
+                i += 1
+            elif role == "user":
                 contents.append(types.Content(role="user", parts=[types.Part.from_text(text=msg.get("content", ""))]))
                 i += 1
             elif role in ("assistant", "model"):

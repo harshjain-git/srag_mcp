@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "a2a-sdk[http-server]>=1.2.0",
     "google-genai>=2.25.0",
     "groq>=1.7.0",
     "mcp[cli]>=2.2.0",
@@ -18,7 +19,10 @@ dependencies = [
 
 [project.scripts]
 srag-mcp = "srag_mcp:main"
+srag-a2a = "a2a_server:main"
 
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.workspace]

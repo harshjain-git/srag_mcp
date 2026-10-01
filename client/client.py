@@ -10,34 +10,59 @@ sys.path = [p for p in sys.path if os.path.normcase(os.path.abspath(p)) != CURRE
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamable_http_client
 from client.llm.tools import convert_mcp_tools, MCPTool
 
 
 @asynccontextmanager
-async def connect_mcp(server_script: str = "server/server.py"):
+async def connect_mcp(
+    server_script: str = "server/server.py",
+    server_url: str | None = None,
+):
     """
-    Spawns and connects to the MCP database server over stdio.
-    Yields:
-        (session, tools): Active ClientSession and list of discovered MCPTool objects.
+    Connects to the MCP database server either remotely over Streamable HTTP
+    or locally by spawning a subprocess over stdio.
+
+    If server_url is provided (or the MCP_SERVER_URL environment variable is set),
+    connects over Streamable HTTP (e.g. deployed on Render).
+    Otherwise, spawns and connects locally over stdio.
     """
-    server_params = StdioServerParameters(
-        command="uv",
-        args=["run", server_script],
-    )
+    target_url = server_url or os.getenv("MCP_SERVER_URL")
 
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            # Initialize connection & discover available database tools
-            await session.initialize()
-            print("Connected to MCP server.\n")
+    if target_url:
+        print(f"Connecting to remote MCP server at {target_url}...")
+        async with streamable_http_client(url=target_url) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                print(f"Connected to remote MCP server at {target_url}.\n")
 
-            response = await session.list_tools()
-            tools = convert_mcp_tools(response.tools)
-            print(f"Discovered {len(tools)} MCP tools: {[t.name for t in tools]}\n")
+                response = await session.list_tools()
+                tools = convert_mcp_tools(response.tools)
+                print(f"Discovered {len(tools)} MCP tools: {[t.name for t in tools]}\n")
 
-            yield session, tools
+                yield session, tools
+    else:
+        server_params = StdioServerParameters(
+            command="uv",
+            args=["run", server_script],
+        )
+
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                print("Connected to local MCP server via stdio.\n")
+
+                response = await session.list_tools()
+                tools = convert_mcp_tools(response.tools)
+                print(f"Discovered {len(tools)} MCP tools: {[t.name for t in tools]}\n")
+
+                yield session, tools
 
 
 if __name__ == "__main__":

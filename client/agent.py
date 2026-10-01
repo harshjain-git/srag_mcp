@@ -1,7 +1,9 @@
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 from dotenv import load_dotenv
 
 # Robust sys.path normalization on Windows:
@@ -28,11 +30,10 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from mcp import ClientSession
 from client.client import connect_mcp
 from client.llm.base import BaseLLM, ToolCall
 from client.llm.factory import get_llm
-from client.llm.tools import MCPTool
+from client.llm.tools import convert_mcp_tools, MCPTool
 
 load_dotenv()
 
@@ -46,20 +47,27 @@ TOOL_OPERATION_TYPES = {
 }
 
 
-async def execute_tool(session: ClientSession, tool_call: ToolCall) -> str:
-    """Execute a single MCP tool call and print structured operation details."""
+async def execute_tool(
+    mcp_target: Any,
+    tool_call: ToolCall,
+    verbose: bool = True,
+) -> str:
+    """
+    Execute a single MCP tool call against an MCPServer (in-process)
+    or ClientSession (stdio/network).
+    """
     op_type = TOOL_OPERATION_TYPES.get(tool_call.name, "Custom (C/R/U/D)")
-    print(f"Tool Used            : {tool_call.name}")
-    print(f"Tool Operation (CRUD): {op_type}")
+    if verbose:
+        print(f"Tool Used            : {tool_call.name}")
+        print(f"Tool Operation (CRUD): {op_type}")
+        if "sql" in tool_call.arguments:
+            print(f"SQL Generated        : {tool_call.arguments['sql']}")
+        elif "operations" in tool_call.arguments:
+            print(f"Operations Payload   : {tool_call.arguments['operations']}")
+        elif tool_call.arguments:
+            print(f"Arguments            : {tool_call.arguments}")
 
-    if "sql" in tool_call.arguments:
-        print(f"SQL Generated        : {tool_call.arguments['sql']}")
-    elif "operations" in tool_call.arguments:
-        print(f"Operations Payload   : {tool_call.arguments['operations']}")
-    elif tool_call.arguments:
-        print(f"Arguments            : {tool_call.arguments}")
-
-    tool_result = await session.call_tool(
+    tool_result = await mcp_target.call_tool(
         tool_call.name,
         tool_call.arguments,
     )
@@ -70,70 +78,210 @@ async def execute_tool(session: ClientSession, tool_call: ToolCall) -> str:
         if hasattr(part, "text")
     )
 
-    preview = result_text[:250] + ("..." if len(result_text) > 250 else "")
-    print(f"Tool Result ({tool_call.name}) :\n{preview}\n")
+    if verbose:
+        preview = result_text[:250] + ("..." if len(result_text) > 250 else "")
+        print(f"Tool Result ({tool_call.name}) :\n{preview}\n")
 
     return result_text
 
 
 async def run_agent(
-    session: ClientSession,
-    llm: BaseLLM,
-    tools: list[MCPTool],
-    query: str,
+    mcp_target: Any,
+    llm: BaseLLM | None = None,
+    tools: list[MCPTool] | None = None,
+    query: str | None = None,
+    *,
+    history: list[dict[str, str]] | None = None,
+    provider: str | None = None,
     max_turns: int = 10,
-) -> str | None:
+    verbose: bool = True,
+    return_details: bool = False,
+) -> Any:
     """
-    Run the sequential agent reasoning loop with structured CLI logging:
-    1. Print User Query
-    2. Display tool executions with SQL and CRUD classifications
-    3. Output Final Answer and Total Tools summary
+    Unified agent runner for both CLI and Web/API execution.
+
+    Parameters:
+      - mcp_target: MCPServer instance or ClientSession
+      - llm: Optional BaseLLM instance (resolved via provider if None)
+      - tools: Optional list of converted MCPTool objects (discovered if None)
+      - query: The user's query prompt
+      - history: Optional prior conversation turns
+      - provider: Optional LLM provider name ('gemini', 'groq', 'ollama')
+      - max_turns: Maximum reasoning turns before cutoff (default: 10)
+      - verbose: Print formatted logs to stdout (default: True)
+      - return_details: If True, returns a rich dictionary with steps, sql, and tabular data;
+                        if False, returns string answer or None for CLI/A2A compatibility.
     """
-    print(f"User Query           : {query}\n")
+    # Allow flexible calling styles: run_agent(target, "query") or run_agent(target, llm, tools, "query")
+    if isinstance(llm, str) and query is None:
+        query = llm
+        llm = None
 
-    messages: list[dict] = [
-        {"role": "user", "content": query}
-    ]
-    tools_used_history: list[str] = []
+    if query is None:
+        raise ValueError("query is required for run_agent")
 
-    for turn in range(1, max_turns + 1):
-        print(f"--- Turn {turn} ---")
+    steps: list[dict[str, Any]] = []
+    captured_sql: str | None = None
+    tabular_data: list[dict[str, Any]] | None = None
 
-        # Step 1: Query LLM with conversation history and available tools
-        llm_response = llm.generate(messages=messages, tools=tools)
+    try:
+        if llm is None:
+            provider = provider or os.getenv("LLM_PROVIDER", "gemini")
+            llm = get_llm(provider)
+        else:
+            provider = provider or getattr(llm, "provider", None) or os.getenv("LLM_PROVIDER", "gemini")
 
-        # Step 2: Check if LLM reached the final answer
-        if not llm_response.tool_calls:
-            print("=" * 65)
-            print("Final Answer:")
-            print(llm_response.text)
-            print("=" * 65)
-            total_summary = ", ".join(tools_used_history) if tools_used_history else "None"
-            print(f"Total Tools Used     : {total_summary} ({len(tools_used_history)} calls total)\n")
-            return llm_response.text
+        if tools is None:
+            raw_tools = await mcp_target.list_tools()
+            tools_list = getattr(raw_tools, "tools", raw_tools)
+            tools = convert_mcp_tools(tools_list)
 
-        # Step 3: Record model turn (preserving raw candidate metadata for Gemini)
-        messages.append({
-            "role": "assistant",
-            "content": llm_response.text,
-            "tool_calls": llm_response.tool_calls,
-            "raw": llm_response.raw,
-        })
+        if verbose:
+            print(f"User Query           : {query}\n")
 
-        # Step 4: Execute requested tool calls against the MCP server
-        for tool_call in llm_response.tool_calls:
-            tools_used_history.append(tool_call.name)
-            result_text = await execute_tool(session, tool_call)
+        SYSTEM_INSTRUCTION = (
+            "You are a helpful, knowledgeable AI database assistant connected to PostgreSQL via MCP.\n"
+            "Guidelines for your final answer:\n"
+            "1. Respond in natural, conversational English with friendly, clear explanations.\n"
+            "2. When presenting lists, rows, or query results, use clean bullet points with bold titles (e.g. • **Name**: info) or clear sentences.\n"
+            "3. DO NOT output raw ASCII pipe-separated tables (such as | Col1 | Col2 |) in your text answer. Keep the narrative clean and readable.\n"
+            "4. Highlight key totals, counts, and findings clearly."
+        )
+
+        # Build initial message history
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": SYSTEM_INSTRUCTION}
+        ]
+        if history:
+            for item in history[-6:]:
+                role = item.get("role", "user")
+                if role in ("user", "assistant"):
+                    messages.append({"role": role, "content": item.get("content", "")})
+
+        messages.append({"role": "user", "content": query})
+
+        tools_used_history: list[str] = []
+
+        for turn in range(1, max_turns + 1):
+            if verbose:
+                print(f"--- Turn {turn} ---")
+
+            llm_response = llm.generate(messages=messages, tools=tools)
+
+            if not llm_response.tool_calls:
+                answer = llm_response.text or "I completed the request."
+                if verbose:
+                    print("=" * 65)
+                    print("Final Answer:")
+                    print(answer)
+                    print("=" * 65)
+                    total_summary = ", ".join(tools_used_history) if tools_used_history else "None"
+                    print(f"Total Tools Used     : {total_summary} ({len(tools_used_history)} calls total)\n")
+
+                if return_details:
+                    return {
+                        "success": True,
+                        "answer": answer,
+                        "steps": steps,
+                        "sql": captured_sql,
+                        "data": tabular_data,
+                        "provider": provider,
+                        "model": getattr(llm, "model", str(llm)),
+                    }
+                return answer
 
             messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "name": tool_call.name,
-                "content": result_text,
+                "role": "assistant",
+                "content": llm_response.text,
+                "tool_calls": llm_response.tool_calls,
+                "raw": llm_response.raw,
             })
 
-    print("Reached maximum turns without a final answer.")
-    return None
+            for tool_call in llm_response.tool_calls:
+                tools_used_history.append(tool_call.name)
+                result_text = await execute_tool(mcp_target, tool_call, verbose=verbose)
+
+                # Parse JSON output (handles single JSON, arrays, and concatenated multi-record JSON)
+                parsed_records: list[dict[str, Any]] = []
+                try:
+                    loaded = json.loads(result_text)
+                    if isinstance(loaded, list):
+                        parsed_records = loaded
+                    elif isinstance(loaded, dict):
+                        if "records" in loaded and isinstance(loaded["records"], list):
+                            parsed_records = loaded["records"]
+                        else:
+                            parsed_records = [loaded]
+                except Exception:
+                    # Stream of multiple JSON objects separated by whitespace/newlines
+                    try:
+                        decoder = json.JSONDecoder()
+                        idx = 0
+                        raw_str = result_text.strip()
+                        while idx < len(raw_str):
+                            while idx < len(raw_str) and raw_str[idx].isspace():
+                                idx += 1
+                            if idx >= len(raw_str):
+                                break
+                            obj, next_idx = decoder.raw_decode(raw_str, idx)
+                            if isinstance(obj, dict):
+                                parsed_records.append(obj)
+                            elif isinstance(obj, list):
+                                parsed_records.extend(obj)
+                            idx = next_idx
+                    except Exception:
+                        pass
+
+                if parsed_records and (not tabular_data or tool_call.name == "query"):
+                    tabular_data = parsed_records
+
+                if "sql" in tool_call.arguments:
+                    captured_sql = tool_call.arguments["sql"]
+
+                steps.append({
+                    "turn": turn,
+                    "tool": tool_call.name,
+                    "arguments": tool_call.arguments,
+                    "sql": tool_call.arguments.get("sql"),
+                    "result_preview": result_text[:400] + ("..." if len(result_text) > 400 else ""),
+                    "is_tabular": bool(parsed_records),
+                })
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call.name,
+                    "content": result_text,
+                })
+
+        if verbose:
+            print("Reached maximum turns without a final answer.")
+
+        if return_details:
+            return {
+                "success": True,
+                "answer": "Reached maximum reasoning turns without a final response.",
+                "steps": steps,
+                "sql": captured_sql,
+                "data": tabular_data,
+                "provider": provider,
+                "model": getattr(llm, "model", str(llm)),
+            }
+        return None
+
+    except Exception as exc:
+        if verbose:
+            print(f"Error during agent execution: {exc}")
+        if return_details:
+            return {
+                "success": False,
+                "answer": f"An error occurred while processing your request: {exc}",
+                "error": str(exc),
+                "steps": steps,
+                "sql": captured_sql,
+                "data": tabular_data,
+            }
+        raise
 
 
 async def main():
@@ -171,6 +319,7 @@ async def main():
 
             print()
             await run_agent(session, llm, tools, query)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
