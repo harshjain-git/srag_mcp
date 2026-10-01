@@ -24,23 +24,29 @@ from client.llm.tools import convert_mcp_tools, MCPTool
 async def connect_mcp(
     server_script: str = "server/server.py",
     server_url: str | None = None,
+    transport: str | None = None,
 ):
     """
-    Connects to the MCP database server either remotely over Streamable HTTP
+    Connects to the MCP database server over Streamable HTTP (default)
     or locally by spawning a subprocess over stdio.
 
-    If server_url is provided (or the MCP_SERVER_URL environment variable is set),
-    connects over Streamable HTTP (e.g. deployed on Render).
-    Otherwise, spawns and connects locally over stdio.
+    If server_url or MCP_SERVER_URL is provided, or if MCP_TRANSPORT is 'streamable-http',
+    connects over Streamable HTTP (e.g. running locally or deployed on Render).
+    Otherwise, if transport is 'stdio', spawns and connects locally over stdio.
     """
-    target_url = server_url or os.getenv("MCP_SERVER_URL")
+    if server_script and (server_script.startswith("http://") or server_script.startswith("https://")):
+        server_url = server_script
 
-    if target_url:
-        print(f"Connecting to remote MCP server at {target_url}...")
+    active_transport = (transport or os.getenv("MCP_TRANSPORT", "streamable-http")).lower()
+    default_http_url = f"http://localhost:{os.getenv('PORT', os.getenv('MCP_PORT', '8000'))}{os.getenv('MCP_PATH', '/mcp')}"
+    target_url = server_url or os.getenv("MCP_SERVER_URL") or (default_http_url if active_transport == "streamable-http" else None)
+
+    if target_url and active_transport != "stdio":
+        print(f"Connecting to MCP server over streamable-http at {target_url}...")
         async with streamable_http_client(url=target_url) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                print(f"Connected to remote MCP server at {target_url}.\n")
+                print(f"Connected to MCP server at {target_url}.\n")
 
                 response = await session.list_tools()
                 tools = convert_mcp_tools(response.tools)
@@ -50,7 +56,7 @@ async def connect_mcp(
     else:
         server_params = StdioServerParameters(
             command="uv",
-            args=["run", server_script],
+            args=["run", server_script, "--transport", "stdio"],
         )
 
         async with stdio_client(server_params) as (read, write):

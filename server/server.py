@@ -3,8 +3,6 @@ import os
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
-from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
 
 # Add project root directory to sys.path so 'server' package imports work cleanly
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -15,7 +13,7 @@ load_dotenv()
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from client.agent import run_agent
+from server.routes import register_all_routes
 from server.tools.query_tool import execute_query
 from server.tools.schema_tool import get_database_schema
 from server.tools.create_tool import create_records
@@ -24,57 +22,8 @@ from server.tools.delete_tool import delete_records
 
 mcp = MCPServer("Structured RAG Database Server")
 
-INDEX_HTML_PATH = Path(__file__).resolve().parent / "web" / "index.html"
-
-
-@mcp.custom_route("/health", methods=["GET"])
-async def health_check(request: Request) -> JSONResponse:
-    """Health check endpoint for Render zero-downtime deploys and uptime monitoring."""
-    return JSONResponse({"status": "healthy", "service": "srag-mcp-server"})
-
-
-@mcp.custom_route("/", methods=["GET"])
-@mcp.custom_route("/chat", methods=["GET"])
-@mcp.custom_route("/chat/", methods=["GET"])
-async def index_endpoint(request: Request) -> HTMLResponse:
-    """Serve the Web Chat UI."""
-    if INDEX_HTML_PATH.exists():
-        return HTMLResponse(INDEX_HTML_PATH.read_text(encoding="utf-8"))
-    return HTMLResponse("<h1>Structured RAG MCP Server</h1><p>Web UI not found. MCP endpoint active at /mcp</p>")
-
-
-@mcp.custom_route("/api/chat", methods=["POST"])
-async def chat_endpoint(request: Request) -> JSONResponse:
-    """Execute natural-language database query through agent reasoning loop."""
-    try:
-        payload = await request.json()
-        query_text = payload.get("query", "").strip()
-        if not query_text:
-            return JSONResponse({"success": False, "error": "Query cannot be empty."}, status_code=400)
-
-        history = payload.get("history", [])
-        provider = payload.get("provider")
-
-        result = await run_agent(
-            mcp_target=mcp,
-            query=query_text,
-            history=history,
-            provider=provider,
-            verbose=False,
-            return_details=True,
-        )
-        return JSONResponse(result)
-    except Exception as exc:
-        return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
-
-
-@mcp.custom_route("/api/schema", methods=["GET"])
-async def schema_endpoint(request: Request) -> JSONResponse:
-    """Return database schema as JSON for UI inspector modal."""
-    try:
-        return JSONResponse(get_database_schema())
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+# Register Web UI, health check, API, and A2A routes
+register_all_routes(mcp)
 
 
 @mcp.tool()
@@ -175,8 +124,9 @@ if __name__ == "__main__":
         print(
             f"\n"
             f"===============================================================\n"
-            f"  Structured RAG MCP Server (Streamable HTTP)\n"
+            f"  Structured RAG Unified Server (Web UI + A2A + MCP)\n"
             f"  -> Web Chat UI : http://{display_host}:{args.port}/\n"
+            f"  -> A2A Card    : http://{display_host}:{args.port}/.well-known/agent-card.json\n"
             f"  -> MCP Endpoint: http://{display_host}:{args.port}{args.path}\n"
             f"  -> Health Check: http://{display_host}:{args.port}/health\n"
             f"===============================================================\n",

@@ -78,39 +78,52 @@ srag_skill = AgentSkill(
 )
 
 
-# A2A AgentCard definition for the SRAG agent
 A2A_HOST = os.getenv("A2A_HOST", "localhost")
 A2A_PORT = int(os.getenv("A2A_PORT", "8001"))
 AGENT_URL = os.getenv("A2A_AGENT_URL", f"http://{A2A_HOST}:{A2A_PORT}")
 
-srag_agent_card = AgentCard(
-    name="Structured RAG PostgreSQL Agent",
-    description=(
-        "Structured Retrieval-Augmented Generation (SRAG) agent that interacts with "
-        "a PostgreSQL database via the Model Context Protocol (MCP) to perform schema "
-        "inspection, analytical SQL querying, and CRUD operations."
-    ),
-    version="1.0.0",
-    supported_interfaces=[
-        AgentInterface(
-            url=AGENT_URL,
-            protocol_binding="JSONRPC",
-            protocol_version="1.0",
+
+def get_srag_agent_card(base_url: str | None = None) -> AgentCard:
+    """Build dynamic AgentCard matching the deployment host or Render URL."""
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
+    if base_url:
+        agent_url = base_url.rstrip("/")
+    elif render_url:
+        agent_url = render_url.rstrip("/")
+    else:
+        agent_url = os.getenv("A2A_AGENT_URL", f"http://{A2A_HOST}:{A2A_PORT}")
+
+    return AgentCard(
+        name="Structured RAG PostgreSQL Agent",
+        description=(
+            "Structured Retrieval-Augmented Generation (SRAG) agent that interacts with "
+            "a PostgreSQL database via the Model Context Protocol (MCP) to perform schema "
+            "inspection, analytical SQL querying, and CRUD operations."
         ),
-        AgentInterface(
-            url=AGENT_URL,
-            protocol_binding="REST",
-            protocol_version="1.0",
+        version="1.0.0",
+        supported_interfaces=[
+            AgentInterface(
+                url=agent_url,
+                protocol_binding="JSONRPC",
+                protocol_version="1.0",
+            ),
+            AgentInterface(
+                url=agent_url,
+                protocol_binding="REST",
+                protocol_version="1.0",
+            ),
+        ],
+        capabilities=AgentCapabilities(
+            streaming=False,
+            push_notifications=False,
         ),
-    ],
-    capabilities=AgentCapabilities(
-        streaming=False,
-        push_notifications=False,
-    ),
-    default_input_modes=["text/plain"],
-    default_output_modes=["text/plain"],
-    skills=[srag_skill],
-)
+        default_input_modes=["text/plain"],
+        default_output_modes=["text/plain"],
+        skills=[srag_skill],
+    )
+
+
+srag_agent_card = get_srag_agent_card()
 
 
 class SRAGAgentExecutor(AgentExecutor):
@@ -120,9 +133,10 @@ class SRAGAgentExecutor(AgentExecutor):
     to the SRAG agent which accesses PostgreSQL via MCP.
     """
 
-    def __init__(self, server_script: str | None = None):
+    def __init__(self, server_script: str | None = None, mcp_server=None):
         super().__init__()
         self._server_script = server_script or str(PROJECT_ROOT / "server" / "server.py")
+        self._mcp_server = mcp_server
         self._session = None
         self._tools = None
         self._lock = asyncio.Lock()
@@ -147,22 +161,33 @@ class SRAGAgentExecutor(AgentExecutor):
             return
 
         async with self._lock:
-            # Reuse lifespan MCP session if available; fallback to per-request connection
-            if self._session and self._tools:
+            # 1. In-process MCPServer instance (used when embedded directly into server/server.py)
+            if self._mcp_server:
+                provider = os.getenv("LLM_PROVIDER", "gemini")
+                answer = await run_agent(
+                    mcp_target=self._mcp_server,
+                    query=user_query,
+                    provider=provider,
+                    verbose=False,
+                    return_details=False,
+                )
+            # 2. Reuse lifespan MCP session if available
+            elif self._session and self._tools:
                 provider = os.getenv("LLM_PROVIDER", "gemini")
                 llm = get_llm(provider)
-                answer = await run_agent(self._session, llm, self._tools, user_query)
+                answer = await run_agent(self._session, llm, self._tools, user_query, verbose=False)
+            # 3. Fallback to per-request connection
             else:
                 async with connect_mcp(self._server_script) as (session, tools):
                     provider = os.getenv("LLM_PROVIDER", "gemini")
                     llm = get_llm(provider)
-                    answer = await run_agent(session, llm, tools, user_query)
+                    answer = await run_agent(session, llm, tools, user_query, verbose=False)
 
         if not answer:
             answer = "No response was generated or the agent reached maximum turns without a final answer."
 
         reply = new_text_message(
-            text=answer,
+            text=str(answer),
             context_id=context.context_id,
             task_id=context.task_id,
         )
@@ -204,7 +229,7 @@ routes = [
 async def lifespan(app: Starlette):
     """Manage lifecycle: connect to MCP server on startup and close on shutdown."""
     server_script = str(PROJECT_ROOT / "server" / "server.py")
-    print("[A2A Server] Spawning and connecting to MCP database server...")
+    print("[A2A Server] Connecting to MCP database server...")
     async with connect_mcp(server_script=server_script) as (session, tools):
         executor.set_mcp(session, tools)
         print("[A2A Server] MCP server connected and ready.")
